@@ -4,8 +4,8 @@
 #include <unordered_map>
 #include <memory>
 
-#include "..\SDK\Recv.h"
-#include "..\SDK\IBaseClientDll.h"
+#include "../SDK/Recv.h"
+#include "../SDK/IBaseClientDll.h"
 
 #include <format>
 

@@ -1,14 +1,21 @@
 #include "Autowall.h"
-#include "..\..\Utils\Utils.h"
-#include "..\..\SDK\IVEngineClient.h"
-#include "..\..\SDK\PlayerInfo.h"
-#include "..\..\SDK\ISurfaceData.h"
-#include "..\..\SDK\Hitboxes.h"
-#include "..\..\SDK\bspflags.h"
-#include "..\..\SDK\ICvar.h"
-#include "..\..\Utils\Math.h"
-#include "..\..\SDK\ClientClass.h"
+#include "../../Utils/Utils.h"
+#include "../../SDK/IVEngineClient.h"
+#include "../../SDK/PlayerInfo.h"
+#include "../../SDK/ISurfaceData.h"
+#include "../../SDK/Hitboxes.h"
+#include "../../SDK/bspflags.h"
+#include "../../SDK/ICvar.h"
+#include "../../Utils/Math.h"
+#include "../../SDK/ClientClass.h"
 #include <algorithm>
+
+#ifdef max
+#undef max
+#endif
+#ifdef min
+#undef min
+#endif
 
 // esoterik ftw
 
@@ -119,31 +126,109 @@ void UTIL_ClipTraceToPlayers(const Vector& vecAbsStart, const Vector& vecAbsEnd,
 	}
 }
 
-bool SimulateFireBullet(C_BaseEntity *local, C_BaseCombatWeapon *weapon, FireBulletData &data)
+bool SimulateFireBullet(C_BaseEntity* local, C_BaseCombatWeapon* weapon, FireBulletData& data)
 {
-	data.penetrate_count = 4;
-	data.trace_length = 0.0f;
-	auto *wpn_data = weapon->GetCSWpnData();
-	data.current_damage = (float)wpn_data->weapon_damage;
-	while ((data.penetrate_count > 0) && (data.current_damage >= 1.0f))
-	{
-		data.trace_length_remaining = wpn_data->weapon_range - data.trace_length;
-		Vector End_Point = data.src + data.direction * data.trace_length_remaining;
-		TraceLine(data.src, End_Point, 0x4600400B, local, &data.enter_trace);
-		UTIL_ClipTraceToPlayers(data.src, End_Point * 40.f, 0x4600400B, &data.filter, &data.enter_trace);
-		if (data.enter_trace.flFraction == 1.0f) 
-			break;
-		if ((data.enter_trace.hitGroup <= 7) && (data.enter_trace.hitGroup > 0) && (local->GetTeam() != data.enter_trace.m_pEnt->GetTeam()))
-		{
-			data.trace_length += data.enter_trace.flFraction * data.trace_length_remaining;
-			data.current_damage *= pow(wpn_data->weapon_range_mod, data.trace_length * 0.002);
-			ScaleDamage(data.enter_trace.hitGroup, data.enter_trace.m_pEnt, wpn_data->weapon_armor_ratio, data.current_damage);
-			return true;
-		}
-		if (!HandleBulletPenetration(wpn_data, data, false, Vector(0,0,0))) 
-			break;
-	}
-	return false;
+        if (!local || !weapon)
+                return false;
+
+        auto* wpn_data = weapon->GetCSWpnData();
+        if (!wpn_data)
+                return false;
+
+        data.penetrate_count = 4;
+        data.trace_length = 0.f;
+        data.hit_count = 0;
+        data.damage = 0.f;
+        data.penetrated = false;
+
+        data.current_damage = static_cast<float>(wpn_data->weapon_damage);
+
+        Vector current_position = data.src;
+        float traveled_distance = 0.f;
+        float last_distance = 0.f;
+        const float max_range = std::max(1.0f, wpn_data->weapon_range - 5.0f);
+        float current_power = data.current_damage;
+
+        if (current_power <= max_range)
+                return false;
+
+        const unsigned int mask = 0x4600400B;
+        const float step_size = 0.1f;
+
+        while (true)
+        {
+                float step_distance = wpn_data->weapon_range - last_distance;
+                Vector ray_end = current_position + data.direction * step_distance;
+
+                C_Ray ray(current_position, ray_end);
+                g_pTrace->TraceRay(ray, mask, &data.filter, &data.trace);
+
+                if (mask & MASK_SHOT_HULL)
+                {
+                        Vector hull_start = data.direction * 40.f + ray_end;
+                        UTIL_ClipTraceToPlayers(hull_start, current_position, mask, &data.filter, &data.trace);
+                }
+
+                if (data.trace.flFraction == 1.f)
+                        break;
+
+                if (data.hit_count < 5)
+                        data.hit_points[data.hit_count++] = data.trace.end;
+
+                surfacedata_t* surface_data = g_pSurfaceData->GetSurfaceData(data.trace.surface.surfaceProps);
+                C_BaseEntity* hit_entity = data.trace.m_pEnt;
+                if (hit_entity)
+                {
+                        auto client_class = hit_entity->GetClientClass();
+                        if (!client_class || client_class->ClassID != static_cast<int>(EClassIds::CCSPlayer))
+                                hit_entity = nullptr;
+                }
+
+                traveled_distance += step_distance * data.trace.flFraction;
+                float damage_modifier = pow(wpn_data->weapon_range_mod, traveled_distance * 0.002f);
+                current_power *= damage_modifier;
+
+                if (max_range > current_power)
+                        break;
+
+                if ((traveled_distance > 3000.f && wpn_data->weapon_penetration > 0.f) ||
+                        step_size > surface_data->game.maxSpeedFactor)
+                        data.penetrate_count = 0;
+
+                if (!(mask & MASK_SHOT_HULL))
+                        data.trace.hitGroup = HITGROUP_GENERIC;
+
+                if (hit_entity)
+                {
+                        if (hit_entity->IsAlive() && hit_entity->GetTeam() != local->GetTeam())
+                        {
+                                if (data.trace.hitGroup >= HITGROUP_HEAD && data.trace.hitGroup <= HITGROUP_RIGHTLEG)
+                                {
+                                        float final_damage = current_power;
+                                        ScaleDamage(data.trace.hitGroup, hit_entity, wpn_data->weapon_armor_ratio, final_damage);
+                                        data.damage = final_damage;
+                                        data.current_damage = final_damage;
+                                        return true;
+                                }
+                        }
+                }
+
+                if (data.penetrate_count <= 0)
+                        break;
+
+                if (!HandleBulletPenetration(wpn_data, data, false, Vector(0, 0, 0)))
+                        break;
+
+                if (current_power <= max_range)
+                        break;
+
+                last_distance = traveled_distance;
+                current_position = data.src;
+        }
+
+        data.current_damage = 0.f;
+        data.damage = 0.f;
+        return false;
 }
 
 bool TraceToExitalt(Vector& end, C_Trace* enter_trace, Vector start, Vector dir, C_Trace* exit_trace)
