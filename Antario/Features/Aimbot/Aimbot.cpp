@@ -8,6 +8,7 @@
 #include "..\..\SDK\ICvar.h"
 #include "..\..\Utils\Math.h"
 #include "..\..\SDK\Hitboxes.h"
+#include <cmath>
 #include "..\..\Menu\Menu.h"
 
 Aimbot g_Aimbot;
@@ -36,68 +37,68 @@ void Aimbot::Autostop( )
 
 bool Aimbot::HitChance( C_BaseEntity* pEnt, C_BaseCombatWeapon* pWeapon, Vector Angle, Vector Point, int chance )
 {
-	if ( chance == 0 || g_Menu.Config.Hitchance == 0 )
-		return true;
+        if ( chance == 0 || g_Menu.Config.Hitchance == 0 )
+                return true;
 
-	if ( Backtrack[ pEnt->EntIndex( ) ] || ShotBacktrack[ pEnt->EntIndex( ) ] ) // doing this bec im lazy
-	{
-		float Velocity = g::pLocalEntity->GetVelocity( ).Length( );
+        static ConVar* weapon_accuracy_nospread = g_pCvar->FindVar( "weapon_accuracy_nospread" );
 
-		if ( Velocity <= ( g::pLocalEntity->GetActiveWeapon( )->GetCSWpnData( )->weapon_max_speed_alt * .34f ) )
-			Velocity = 0.0f;
+        if ( weapon_accuracy_nospread && weapon_accuracy_nospread->GetBool() )
+                return true;
 
-		float SpreadCone = pWeapon->GetAccuracyPenalty( ) * 256.0f / M_PI + pWeapon->GetCSWpnData( )->weapon_max_speed * Velocity / 3000.0f; // kmeth https://github.com/DankPaster/kmethdude
-		float a = ( Point - g::pLocalEntity->GetEyePosition( ) ).Length( );
-		float b = sqrt( tan( SpreadCone * M_PI / 180.0f ) * a );
-		if ( 2.2f > b ) return true;
-		return ( chance <= ( ( 2.2f / fmax( b, 2.2f ) ) * 100.0f ) );
-	}
+        Vector eye_pos = g::pLocalEntity->GetEyePosition();
 
-	float Seeds = ( g_Menu.Config.Hitchance == 1 ) ? 356.f : 256.f;
+        float inaccuracy = pWeapon->GetInaccuracy() + pWeapon->GetSpread();
 
-	Angle -= ( g::pLocalEntity->GetAimPunchAngle( ) * g_pCvar->FindVar( "weapon_recoil_scale" )->GetFloat( ) );
+        Vector aim_dir = ( Point - eye_pos ).Normalize();
+        float dist = eye_pos.DistTo( Point );
+        float spread_r = dist * inaccuracy;
 
-	Vector forward, right, up;
+        static int HitboxForMuti[ ] = { 2, 2, 4, 4, 6, 6 };
+        int found = -1;
+        for ( int i = 0; i < 28; ++i )
+        {
+                if ( g::AimbotHitbox[ pEnt->EntIndex() ][ i ] == Point )
+                {
+                        found = i;
+                        break;
+                }
+        }
 
-	g_Math.AngleVectors( Angle, &forward, &right, &up );
+        int hitbox = found;
+        if ( found >= 19 && found < 25 )
+                hitbox = HitboxForMuti[ found - 19 ];
+        else if ( found >= 25 && found <= 27 )
+                hitbox = 0;
 
-	int Hits = 0, neededHits = ( Seeds * ( chance / 100.f ) );
+        float tgt_r = 0.f;
+        Vector tgt_center = pEnt->GetHitboxPosition( hitbox == -1 ? 0 : hitbox, Matrix[ pEnt->EntIndex() ], &tgt_r );
 
-	float weapSpread = pWeapon->GetSpread( ), weapInaccuracy = pWeapon->GetInaccuracy( );
+        Vector diff = tgt_center - Point;
+        float d = ( diff - aim_dir * diff.Dot( aim_dir ) ).Length();
 
-	for ( int i = 0; i < Seeds; i++ )
-	{
-		float Inaccuracy = g_Math.RandomFloat( 0.f, 1.f ) * weapInaccuracy;
-		float Spread = g_Math.RandomFloat( 0.f, 1.f ) * weapSpread;
+        auto overlap_ratio = [&]( float r1, float r2, float sep ) -> float
+        {
+                if ( r1 <= 0.f )
+                        return 0.f;
 
-		Vector spreadView( ( cos( g_Math.RandomFloat( 0.f, 2.f * M_PI ) ) * Inaccuracy ) + ( cos( g_Math.RandomFloat( 0.f, 2.f * M_PI ) ) * Spread ), ( sin( g_Math.RandomFloat( 0.f, 2.f * M_PI ) ) * Inaccuracy ) + ( sin( g_Math.RandomFloat( 0.f, 2.f * M_PI ) ) * Spread ), 0 ), direction;
-		direction = Vector( forward.x + ( spreadView.x * right.x ) + ( spreadView.y * up.x ), forward.y + ( spreadView.x * right.y ) + ( spreadView.y * up.y ), forward.z + ( spreadView.x * right.z ) + ( spreadView.y * up.z ) ).Normalize( );
+                if ( sep >= r1 + r2 )
+                        return 0.f;
 
-		Vector viewanglesSpread, viewForward;
+                if ( sep <= fabs( r1 - r2 ) )
+                        return r2 <= r1 ? ( r2 * r2 ) / ( r1 * r1 ) : 1.f;
 
-		g_Math.VectorAngles( direction, up, viewanglesSpread );
-		g_Math.NormalizeAngles( viewanglesSpread );
+                float r1sq = r1 * r1, r2sq = r2 * r2;
+                float alpha = acos( ( sep * sep + r1sq - r2sq ) / ( 2.f * sep * r1 ) );
+                float beta = acos( ( sep * sep + r2sq - r1sq ) / ( 2.f * sep * r2 ) );
+                float part = -sep + r1 + r2;
+                float area = r1sq * alpha + r2sq * beta - 0.5f * sqrt( part * ( sep + r1 - r2 ) * ( sep - r1 + r2 ) * ( sep + r1 + r2 ) );
 
-		g_Math.AngleVectors( viewanglesSpread, &viewForward );
-		viewForward.NormalizeInPlace( );
+                return area / ( M_PI * r1sq );
+        };
 
-		viewForward = g::pLocalEntity->GetEyePosition( ) + ( viewForward * pWeapon->GetCSWpnData( )->weapon_range );
+        float probability = overlap_ratio( spread_r, tgt_r, d );
 
-		C_Trace Trace;
-
-		g_pTrace->ClipRayToEntity( C_Ray( g::pLocalEntity->GetEyePosition( ), viewForward ), mask_shot | contents_grate, pEnt, &Trace );
-
-		if ( Trace.m_pEnt == pEnt )
-			Hits++;
-
-		if ( ( ( Hits / Seeds ) * 100.f ) >= chance )
-			return true;
-
-		if ( ( Seeds - i + Hits ) < neededHits )
-			return false;
-	}
-
-	return false;
+        return probability >= ( static_cast< float >( chance ) / 100.f );
 }
 
 bool ShouldBaim( C_BaseEntity* pEnt ) // probably dosnt make sense
