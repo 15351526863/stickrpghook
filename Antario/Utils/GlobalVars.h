@@ -1,6 +1,6 @@
 #pragma once
-#include "..\SDK\CInput.h"
-#include "..\SDK\CEntity.h"
+#include "../SDK/CInput.h"
+#include "../SDK/CEntity.h"
 
 namespace g
 {
